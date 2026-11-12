@@ -41,8 +41,8 @@ def env(name, default):
 
 
 # ======================= SETTINGS =======================
-MODE = env("MODE", "demo")                    # "demo" = testnet, virtual money | "live" = REAL MONEY
-LIVE_CONFIRM = env("LIVE_CONFIRM", "")        # for live, exactly:  YES I ACCEPT REAL LOSSES
+MODE = env("MODE", "demo").strip().strip("\"'").strip().lower()                    # "demo" = testnet, virtual money | "live" = REAL MONEY
+LIVE_CONFIRM = env("LIVE_CONFIRM", "").strip().strip("\"'").strip()        # for live, exactly:  YES I ACCEPT REAL LOSSES
 API_KEY = env("DELTA_API_KEY", "PASTE_API_KEY")
 API_SECRET = env("DELTA_API_SECRET", "PASTE_API_SECRET")
 TG_TOKEN = env("TG_TOKEN", "PASTE_BOT_TOKEN")
@@ -637,7 +637,7 @@ def outgoing_ip(api):
 # ============================ commands ============================
 def build_api():
     if MODE not in ("demo", "live"):
-        raise SystemExit('MODE must be "demo" or "live".')
+        raise SystemExit('MODE must be "demo" or "live" (the bot received: %r).' % MODE)
     if MODE == "live" and LIVE_CONFIRM != LIVE_PHRASE:
         raise SystemExit('Live mode uses REAL MONEY. Set LIVE_CONFIRM to exactly: %s' % LIVE_PHRASE)
     if "PASTE_" in API_KEY or "PASTE_" in API_SECRET:
