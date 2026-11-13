@@ -140,7 +140,17 @@ class Delta:
 
     def product(self):
         res = self.request("GET", "/v2/products/%s" % SYMBOL, auth=False)["result"]
+        ctype = str(res.get("contract_type") or "")
+        if ctype and ctype != "perpetual_futures":
+            raise SystemExit("Product %s is %s, not a perpetual future. Refusing to trade." % (SYMBOL, ctype))
+        self.product_info = "contract_type=%s, settling asset=%s, state=%s" % (
+            ctype or "?", (res.get("settling_asset") or {}).get("symbol", "?"), res.get("state", "?"))
         return int(res["id"]), float(res.get("contract_value") or 0.001), float(res.get("tick_size") or 0.5)
+
+    def all_wallets(self):
+        res = self.request("GET", "/v2/wallet/balances").get("result", [])
+        return ["%s free %s / total %s" % (b.get("asset_symbol"), b.get("available_balance"), b.get("balance"))
+                for b in (res if isinstance(res, list) else [])]
 
     def position(self, pid):
         res = self.request("GET", "/v2/positions", params={"product_id": pid}).get("result")
@@ -660,6 +670,8 @@ def cmd_check(api):
     print("IP Delta will see:", outgoing_ip(api), "| via proxy" if api.proxies else "| direct")
     pid, cv, tick = api.product()
     print("Product %s: id %s, contract %s BTC, tick %s" % (SYMBOL, pid, cv, tick))
+    print("Product details: %s" % getattr(api, "product_info", "?"))
+    print("ALL wallets on this account: %s" % ("; ".join(api.all_wallets()) or "none"))
     free, total = api.available(WALLET_ASSET)
     print("Wallet %s: free %s / total %s" % (WALLET_ASSET, free, total))
     size, raw = api.position(pid)
