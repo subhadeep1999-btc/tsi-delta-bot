@@ -92,11 +92,17 @@ def ist(ts, fmt="%d %b %H:%M"):
 
 # ============================ allocation ============================
 def allocation():
+    """The rupee allocation expressed in wallet units (INR wallet: as is, USD wallet: converted)."""
+    if INR_PER_USD <= 0:
+        raise SystemExit("Set INR_PER_USD (rupees per dollar). It is needed to size the position. Nothing traded.")
     if WALLET_ASSET.upper() == "INR":
         return float(CAPITAL_INR)
-    if INR_PER_USD <= 0:
-        raise SystemExit("Set INR_PER_USD (rupees per dollar) so the rupee allocation can be converted. Nothing traded.")
     return round(CAPITAL_INR / INR_PER_USD, 4)
+
+
+def fx():
+    """Wallet units per 1 USD of contract value (Delta India BTCUSD is quoted in USD but margined and settled in INR)."""
+    return INR_PER_USD if WALLET_ASSET.upper() == "INR" else 1.0
 
 
 # ============================ Delta API ============================
@@ -148,7 +154,8 @@ class Delta:
         for b in res if isinstance(res, list) else []:
             if str(b.get("asset_symbol", "")).upper() == asset.upper():
                 return float(b.get("available_balance") or 0), float(b.get("balance") or 0)
-        raise ApiError("No %s wallet found" % asset)
+        raise ApiError("No %s wallet found. Wallets on this account: %s. Set the WALLET_ASSET variable to one of them." % (
+            asset, ", ".join(str(b.get("asset_symbol")) for b in (res if isinstance(res, list) else [])) or "none"))
 
     def get_leverage(self, pid):
         res = self.request("GET", "/v2/products/%s/orders/leverage" % pid).get("result", {})
@@ -157,7 +164,7 @@ class Delta:
         raise ApiError("Cannot read leverage: %s" % json.dumps(res)[:200])
 
     def set_leverage(self, pid, lev):
-        self.request("POST", "/v2/products/%s/orders/leverage" % pid, payload={"leverage": str(lev)})
+        self.request("POST", "/v2/products/%s/orders/leverage" % pid, payload={"leverage": int(lev) if float(lev).is_integer() else float(lev)})
 
     def last_price(self):
         res = self.request("GET", "/v2/tickers/%s" % SYMBOL, auth=False).get("result", {})
@@ -339,7 +346,7 @@ def money(wallet_amount):
 
 def pnl_of(trade, exit_px):
     pts = trade["side"] * (exit_px - trade["entry"])
-    wallet = pts * trade["cv"] * trade["n"]
+    wallet = pts * trade["cv"] * trade["n"] * fx()
     pct = wallet / allocation() * 100.0 if allocation() else 0.0
     return pts, wallet, pct
 
@@ -430,8 +437,9 @@ def open_position(api, pid, cv, tick, side, price, now, info):
     free, total = api.available(WALLET_ASSET)
     if free < capital:
         return None, ["⚠️ SKIPPED OPEN: free balance %.4f %s is below the allocation %.4f. No order placed." % (free, WALLET_ASSET, capital)]
-    n = int(math.floor(capital * LEVERAGE / (price * cv)))
-    per = cv * price / LEVERAGE
+    unit = price * cv * fx()                      # one contract's value in wallet units
+    n = int(math.floor(capital * LEVERAGE / unit))
+    per = unit / LEVERAGE                         # margin for one contract in wallet units
     while n >= 1 and n * per * (1 + MARGIN_BUFFER) > free:
         n -= 1
     if n < 1:
@@ -628,10 +636,12 @@ def run_once(api, pid, cv, tick, st):
 
 
 def outgoing_ip(api):
-    try:
-        return requests.get("https://api.ipify.org", timeout=10, proxies=api.proxies).text.strip()
-    except Exception as e:
-        return "unknown (%s)" % str(e)[:50]
+    for url in ("https://api.ipify.org", "https://api6.ipify.org"):
+        try:
+            return requests.get(url, timeout=10, proxies=api.proxies).text.strip()
+        except Exception:
+            pass
+    return "unknown"
 
 
 # ============================ commands ============================
@@ -667,12 +677,13 @@ def cmd_check(api):
 
 
 def cmd_test_order(api):
-    if MODE != "demo":
-        raise SystemExit("--test-order works only in demo mode.")
     pid, cv, tick = api.product()
     size, _ = api.position(pid)
     if size != 0:
-        raise SystemExit("Demo account already has a position (%g). Close it first." % size)
+        raise SystemExit("The account already has a position (%g). Close it first." % size)
+    if MODE == "live":
+        send_alert("⚠️ [LIVE] TEST ORDER starting: the bot will REALLY buy 1 contract (about 0.001 BTC), place and cancel a stop order, "
+                   "then sell it. Cost: only trading fees and a tiny spread.")
     api.set_leverage(pid, LEVERAGE)
     print("Leverage now:", api.get_leverage(pid))
     api.order("buy", 1)
@@ -692,7 +703,7 @@ def cmd_test_order(api):
         print("STOP ORDER PROBLEM (tell Claude this exact text):", e)
     api.order("sell", abs(s), reduce_only=True)
     print("position after close:", wait_position(api, pid, lambda x: x == 0))
-    send_alert("🧪 [DEMO] test cycle finished: buy 1 contract, stop order placed and cancelled, closed.")
+    send_alert("🧪 [%s] test cycle finished: bought 1 contract, stop order placed and cancelled, closed. %s" % (MODE.upper(), balance_text(api)))
 
 
 if __name__ == "__main__":
