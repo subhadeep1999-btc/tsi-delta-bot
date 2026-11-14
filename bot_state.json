@@ -1,0 +1,14 @@
+{
+ "handled": [],
+ "halted": false,
+ "trade": null,
+ "totals": {
+  "closed": 0,
+  "wins": 0,
+  "pts": 0.0,
+  "wallet": 0.0,
+  "days": {}
+ },
+ "last_hb_date": "",
+ "warned": []
+}
