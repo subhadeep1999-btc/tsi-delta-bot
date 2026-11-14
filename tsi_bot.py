@@ -7,7 +7,8 @@ Rules
   - Every valid crossover: close the running trade and open a new one (bullish = LONG, bearish = SHORT).
     From flat (also after a stop-out or a manual close) the next valid crossover opens a trade, either direction.
   - BIG-CANDLE SKIP: the crossover is skipped (nothing closed, nothing opened) if the crossover 1h candle, the one
-    before it (LOOKBACK_CANDLES), or any 45m candle added since the last 1h reading has a range >= MAX_CANDLE_PTS.
+    before it (LOOKBACK_CANDLES), or any 45m candle added since the last 1h reading is >= MAX_CANDLE_PTS, where a candle's size is |close - previous
+    candle close| (CANDLE_MEASURE=change, the default, the figure TradingView shows) or high-low (CANDLE_MEASURE=range).
   - STOPS (every trade): 1) exchange stop-loss MAX_LOSS_PTS from entry, 2) bot check on every run (closes the trade
     at market if the stop level was touched but the exchange stop did not fire), 3) wider exchange hard stop
     HARD_STOP_PTS (0 = off).
@@ -53,6 +54,7 @@ SYMBOL = "BTCUSD"
 TSI_LONG, TSI_SHORT, TSI_SIGNAL = 25, 13, 13
 CALC_MIN, CHART_MIN = 45, 60
 MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
+CANDLE_MEASURE = env("CANDLE_MEASURE", "change").strip().strip("\"'").lower()   # "change" = |close - previous close| (what TradingView shows) | "range" = high - low
 LOOKBACK_CANDLES = env("LOOKBACK_CANDLES", 2)
 MAX_LOSS_PTS = env("MAX_LOSS_PTS", 800)
 HARD_STOP_PTS = env("HARD_STOP_PTS", 1200)    # second exchange stop, 0 = off
@@ -262,6 +264,13 @@ def cross(prev_diff, cur_diff):
     return 0
 
 
+def size_of(bars, k):
+    """Size of candle k: |close - previous candle close| (default) or high - low."""
+    if CANDLE_MEASURE == "range" or k < 1:
+        return bars[k]["h"] - bars[k]["l"]
+    return abs(bars[k]["c"] - bars[k - 1]["c"])
+
+
 def chart_signals(bars1h, bars45, tsi, sig):
     """Per 1h candle: crossover (+1/-1/0), biggest 45m range added since the last reading, (tsi, signal) shown."""
     ends = [b["end"] for b in bars45]
@@ -273,8 +282,8 @@ def chart_signals(bars1h, bars45, tsi, sig):
             extra.append(0.0)
             shown.append(None)
             continue
-        new = bars45[(prev_j + 1 if prev_j is not None else j): j + 1]
-        extra.append(max(x["h"] - x["l"] for x in new) if new else 0.0)
+        first = prev_j + 1 if prev_j is not None else j
+        extra.append(max([size_of(bars45, k) for k in range(first, j + 1)] or [0.0]))
         cur = tsi[j] - sig[j]
         out.append(cross(prev, cur) if prev is not None else 0)
         shown.append((tsi[j], sig[j]))
@@ -285,7 +294,7 @@ def chart_signals(bars1h, bars45, tsi, sig):
 def skip_flags(bars, extra, lookback, thr):
     flags = []
     for i in range(len(bars)):
-        r = max(x["h"] - x["l"] for x in bars[max(0, i - lookback + 1):i + 1])
+        r = max(size_of(bars, k) for k in range(max(0, i - lookback + 1), i + 1))
         flags.append(bool(thr) and max(r, extra[i]) >= thr)
     return flags
 
@@ -568,7 +577,7 @@ def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     tv = mkt["shown"][i]
     head = "%s [%s] %s TSI %s crossover on the 1h candle labelled %s (closed %s IST)" % (
         "🟢" if d == 1 else "🔴", MODE.upper(), SYMBOL, word, ist(bar["t"], "%H:%M"), ist(bar["end"], "%H:%M"))
-    tail = "\nTSI %.2f vs signal %.2f | candle range %.0f pts | price %.1f" % (tv[0], tv[1], bar["h"] - bar["l"], bar["c"]) if tv else ""
+    tail = "\nTSI %.2f vs signal %.2f | candle move %.0f pts (range %.0f) | price %.1f" % (tv[0], tv[1], size_of(bars, i), bar["h"] - bar["l"], bar["c"]) if tv else ""
     age = (now - bar["end"]) / 60.0
     if age > MAX_SIGNAL_AGE_MIN:
         st["handled"].append(key)
@@ -576,10 +585,10 @@ def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
         return
     if mkt["skip"][i]:
         st["handled"].append(key)
-        r1, r2 = bar["h"] - bar["l"], mkt["extra"][i]
-        prev = max(x["h"] - x["l"] for x in bars[max(0, i - LOOKBACK_CANDLES + 1):i + 1])
-        send_alert("%s\n⚪ SKIPPED: a candle of %d+ points is involved (1h/previous %.0f, 45m %.0f). Nothing closed or opened; waiting for the next crossover.%s"
-                   % (head, MAX_CANDLE_PTS, prev, r2, tail))
+        r1, r2 = size_of(bars, i), mkt["extra"][i]
+        prev = max(size_of(bars, k) for k in range(max(0, i - LOOKBACK_CANDLES + 1), i + 1))
+        send_alert("%s\n⚪ SKIPPED: a candle move of %d+ points is involved (1h/previous %.0f, 45m %.0f; %s). Nothing closed or opened; waiting for the next crossover.%s"
+                   % (head, MAX_CANDLE_PTS, prev, r2, "close-to-close change" if CANDLE_MEASURE != "range" else "high-low range", tail))
         log_row([ist(now, "%Y-%m-%d %H:%M"), MODE, "SKIP", word, "", "", "", "", "", "big candle"])
         return
     if st["halted"] or PAUSE:
@@ -682,8 +691,8 @@ def cmd_check(api):
         print("Could not read leverage:", e)
     mkt = load_market()
     i = len(mkt["bars"]) - 1
-    print("Last closed 1h candle labelled %s IST: range %.0f pts | crossover now: %s | skipped by big-candle rule: %s" %
-          (ist(mkt["bars"][i]["t"], "%d %b %H:%M"), mkt["bars"][i]["h"] - mkt["bars"][i]["l"], mkt["sg"][i] or "none", mkt["skip"][i]))
+    print("Last closed 1h candle labelled %s IST: move %.0f pts (range %.0f) | crossover now: %s | skipped by big-candle rule: %s" %
+          (ist(mkt["bars"][i]["t"], "%d %b %H:%M"), size_of(mkt["bars"], i), mkt["bars"][i]["h"] - mkt["bars"][i]["l"], mkt["sg"][i] or "none", mkt["skip"][i]))
     print("Allocation:", CAPITAL_INR, "INR =", allocation(), WALLET_ASSET)
     print("Check finished: no orders were sent.")
 
