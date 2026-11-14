@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "once = normal run, check = read-only test, test-order = small real order test, status = report"
+        description: "once = normal run, check = read-only test, test-order = demo order test"
         default: "once"
         type: choice
         options:
@@ -54,7 +54,7 @@ jobs:
         run: |
           git config user.name "tsi-bot"
           git config user.email "tsi-bot@users.noreply.github.com"
-          git add bot_state.json trades_log.csv 2>/dev/null || true
+          for f in bot_state.json trades_log.csv; do [ -f "$f" ] && git add -f "$f"; done || true
           git commit -m "bot state" || echo "nothing to save"
           git pull --rebase || true
           git push || true
