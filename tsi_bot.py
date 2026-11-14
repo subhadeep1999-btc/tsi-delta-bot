@@ -2,8 +2,11 @@
 TSI bot for Delta Exchange India BTCUSD perpetual (demo by default).
 
 Rules
-  - TSI(25,13,13) is calculated on 45-minute candles and READ ON THE 1H CHART: at every 1h candle close the latest
-    CLOSED 45m TSI value is used. A crossover = TSI crossing its signal line between two consecutive 1h candles.
+  - TSI(25,13,13) is calculated on 45-minute candles and READ ON THE 1H CHART exactly as TradingView draws it
+    (SIGNAL_MAP=B, default): each 1h candle shows the TSI of the 45m candle that OPENED last before the 1h candle closed.
+    That 45m candle closes between 0 and 45 minutes AFTER the 1h close, so the signal is confirmed and traded then
+    (SIGNAL_MAP=A = the last 45m candle already closed at the 1h close; matches the chart only about half the time).
+    A crossover = TSI crossing its signal line between two consecutive 1h candles.
   - Every valid crossover: close the running trade and open a new one (bullish = LONG, bearish = SHORT).
     From flat (also after a stop-out or a manual close) the next valid crossover opens a trade, either direction.
   - BIG-CANDLE SKIP: the crossover is skipped (nothing closed, nothing opened) if the crossover 1h candle, the one
@@ -54,6 +57,7 @@ SYMBOL = "BTCUSD"
 TSI_LONG, TSI_SHORT, TSI_SIGNAL = 25, 13, 13
 CALC_MIN, CHART_MIN = 45, 60
 MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
+SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = as TradingView draws it (the 45m candle that OPENS inside the 1h candle; known up to 45 min after the 1h close) | "A" = last 45m candle already closed at the 1h close
 CANDLE_MEASURE = env("CANDLE_MEASURE", "change").strip().strip("\"'").lower()   # "change" = |close - previous close| (what TradingView shows) | "range" = high - low
 LOOKBACK_CANDLES = env("LOOKBACK_CANDLES", 2)
 MAX_LOSS_PTS = env("MAX_LOSS_PTS", 800)
@@ -272,23 +276,31 @@ def size_of(bars, k):
 
 
 def chart_signals(bars1h, bars45, tsi, sig):
-    """Per 1h candle: crossover (+1/-1/0), biggest 45m range added since the last reading, (tsi, signal) shown."""
+    """Per 1h candle: crossover (+1/-1/0), biggest 45m move added since the last reading, (tsi, signal) shown,
+    and the time (end of the 45m candle used) at which the reading became known."""
     ends = [b["end"] for b in bars45]
-    out, extra, shown, prev, prev_j = [], [], [], None, None
+    index = {b["t"]: k for k, b in enumerate(bars45)}
+    step = CALC_MIN * 60
+    out, extra, shown, known, prev, prev_j = [], [], [], [], None, None
     for cb in bars1h:
-        j = bisect_right(ends, cb["end"]) - 1
+        if SIGNAL_MAP == "A":
+            j = bisect_right(ends, cb["end"]) - 1
+        else:                                               # B: the 45m candle that opened last before the 1h close
+            j = index.get(((cb["end"] - 1) // step) * step, -1)   # -1 = that 45m candle is not closed yet
         if j < 1:
             out.append(0)
             extra.append(0.0)
             shown.append(None)
+            known.append(cb["end"])
             continue
         first = prev_j + 1 if prev_j is not None else j
         extra.append(max([size_of(bars45, k) for k in range(first, j + 1)] or [0.0]))
         cur = tsi[j] - sig[j]
         out.append(cross(prev, cur) if prev is not None else 0)
         shown.append((tsi[j], sig[j]))
+        known.append(max(cb["end"], bars45[j]["end"]))
         prev, prev_j = cur, j
-    return out, extra, shown
+    return out, extra, shown, known
 
 
 def skip_flags(bars, extra, lookback, thr):
@@ -305,9 +317,9 @@ def load_market():
     if len(bars45) < 150 or len(bars1h) < 100:
         raise RuntimeError("too few candles")
     tsi, sig = tsi_series([b["c"] for b in bars45])
-    sg, extra, shown = chart_signals(bars1h, bars45, tsi, sig)
+    sg, extra, shown, known = chart_signals(bars1h, bars45, tsi, sig)
     skip = skip_flags(bars1h, extra, LOOKBACK_CANDLES, MAX_CANDLE_PTS)
-    return {"c15": c15, "bars": bars1h, "sg": sg, "skip": skip, "extra": extra, "shown": shown}
+    return {"c15": c15, "bars": bars1h, "sg": sg, "skip": skip, "extra": extra, "shown": shown, "known": known}
 
 
 # ============================ state, logs, Telegram ============================
@@ -577,8 +589,11 @@ def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     tv = mkt["shown"][i]
     head = "%s [%s] %s TSI %s crossover on the 1h candle labelled %s (closed %s IST)" % (
         "🟢" if d == 1 else "🔴", MODE.upper(), SYMBOL, word, ist(bar["t"], "%H:%M"), ist(bar["end"], "%H:%M"))
+    kn = (mkt.get("known") or [bar["end"]] * (i + 1))[i]
+    if kn > bar["end"]:
+        head += ", confirmed %s IST when the 45m candle closed" % ist(kn, "%H:%M")
     tail = "\nTSI %.2f vs signal %.2f | candle move %.0f pts (range %.0f) | price %.1f" % (tv[0], tv[1], size_of(bars, i), bar["h"] - bar["l"], bar["c"]) if tv else ""
-    age = (now - bar["end"]) / 60.0
+    age = (now - (mkt.get("known") or [bar["end"]] * (i + 1))[i]) / 60.0       # minutes since the signal became known
     if age > MAX_SIGNAL_AGE_MIN:
         st["handled"].append(key)
         send_alert("%s\nExpired (%.0f min old, limit %d). No order placed.%s" % (head, age, MAX_SIGNAL_AGE_MIN, tail))
