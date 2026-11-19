@@ -47,6 +47,8 @@ jobs:
           INR_PER_USD: ${{ vars.INR_PER_USD }}
           WALLET_ASSET: ${{ vars.WALLET_ASSET }}
           BOT_PAUSE: ${{ vars.BOT_PAUSE }}
+          FULL_BUDGET: ${{ vars.FULL_BUDGET }}
+          MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
         run: python tsi_bot.py --${{ inputs.cmd || 'once' }}
 
       - name: Save bot memory
