@@ -68,6 +68,8 @@ WALLET_ASSET = env("WALLET_ASSET", "USD")
 INR_PER_USD = env("INR_PER_USD", 0.0)         # rupees per dollar (needed if the wallet is USD)
 LEVERAGE = env("LEVERAGE", 25)
 MARGIN_BUFFER = 0.10
+FULL_BUDGET = str(env("FULL_BUDGET", "0")).strip().lower() in ("1", "true", "yes", "on")   # 1 = use the whole CAPITAL_INR as margin
+MAX_LEVERAGE = int(float(env("MAX_LEVERAGE", 50)))                                       # the most leverage FULL_BUDGET may use
 MAX_SIGNAL_AGE_MIN = env("MAX_SIGNAL_AGE_MIN", 25)
 HEARTBEAT_HOUR_IST = 9
 PAUSE = env("BOT_PAUSE", "") == "1"           # 1 = watch and report only, place no new trades
@@ -469,16 +471,23 @@ def open_position(api, pid, cv, tick, side, price, now, info):
     if free < capital:
         return None, ["⚠️ SKIPPED OPEN: free balance %.4f %s is below the allocation %.4f. No order placed." % (free, WALLET_ASSET, capital)]
     unit = price * cv * fx()                      # one contract's value in wallet units
-    n = int(math.floor(capital * LEVERAGE / unit))
-    per = unit / LEVERAGE                         # margin for one contract in wallet units
+    lev = LEVERAGE
+    if FULL_BUDGET:
+        # as many whole contracts as MAX_LEVERAGE allows, then the LOWEST leverage that lets them use the whole budget
+        n = int(math.floor(capital * MAX_LEVERAGE / unit))
+        if n >= 1:
+            lev = min(MAX_LEVERAGE, max(1, int(math.ceil(n * unit / capital - 1e-9))))
+    else:
+        n = int(math.floor(capital * LEVERAGE / unit))
+    per = unit / lev                              # margin for one contract in wallet units
     while n >= 1 and n * per * (1 + MARGIN_BUFFER) > free:
         n -= 1
     if n < 1:
         return None, ["⚠️ SKIPPED OPEN: not enough margin for 1 contract (needs about %.4f %s, free %.4f). No order placed." % (per, WALLET_ASSET, free)]
-    api.set_leverage(pid, LEVERAGE)
+    api.set_leverage(pid, lev)
     got = api.get_leverage(pid)
-    if abs(got - LEVERAGE) > 1e-9:
-        raise ApiError("Leverage is %gx, expected %dx. No order placed." % (got, LEVERAGE))
+    if abs(got - lev) > 1e-9:
+        raise ApiError("Leverage is %gx, expected %dx. No order placed." % (got, lev))
     resp = api.order("buy" if side == 1 else "sell", n)
     size = wait_position(api, pid, lambda s: s != 0)
     if size == 0:
@@ -507,7 +516,7 @@ def open_position(api, pid, cv, tick, side, price, now, info):
         lines.append("⚠️ Exchange stop NOT placed (%s). The bot checks the %d-point stop on every run and will close at market." %
                      ("; ".join(problems), MAX_LOSS_PTS))
     lines.insert(0, "📌 OPENED %s %d contract(s) at %.1f | %dx | margin about %.4f %s" %
-                 ("LONG" if side == 1 else "SHORT", trade["n"], entry, LEVERAGE, trade["n"] * per, WALLET_ASSET))
+                 ("LONG" if side == 1 else "SHORT", trade["n"], entry, lev, trade["n"] * per, WALLET_ASSET))
     log_row([ist(now, "%Y-%m-%d %H:%M"), MODE, "OPEN", "LONG" if side == 1 else "SHORT", entry, "", trade["n"], "", "", info])
     return trade, lines
 
