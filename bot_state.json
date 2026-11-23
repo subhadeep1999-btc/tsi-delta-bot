@@ -23,26 +23,16 @@
   "1795399200|-1"
  ],
  "halted": false,
- "trade": {
-  "side": -1,
-  "entry": 60662.5,
-  "n": 4,
-  "cv": 0.001,
-  "opened_ts": 1795401056.8478565,
-  "opened_label": "23 Nov 08:00 IST",
-  "sl1": 61462.5,
-  "stop_ids": {
-   "sl1": 1706497544,
-   "sl3": 1706497633
+ "trade": null,
+ "totals": {
+  "closed": 1,
+  "wins": 0,
+  "pts": -831.0,
+  "wallet": -3.3240000000000003,
+  "days": {
+   "2026-11-23": -3.3240000000000003
   }
  },
- "totals": {
-  "closed": 0,
-  "wins": 0,
-  "pts": 0.0,
-  "wallet": 0.0,
-  "days": {}
- },
- "last_hb_date": "2026-11-22",
+ "last_hb_date": "2026-11-23",
  "warned": []
 }
