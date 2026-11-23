@@ -11,3 +11,4 @@ time_ist,mode,event,side,entry,exit,contracts,pts,wallet_pnl,note
 2026-11-22 16:01,live,SKIP,BULLISH,,,,,,big candle
 2026-11-23 08:00,live,OPEN,SHORT,60662.5,,4,,,BEARISH crossover
 2026-11-23 09:00,live,CLOSE stop-loss hit,SHORT,60662.5,61493.5,4,-831.0,-3.324,
+2026-11-23 11:31,live,OPEN,LONG,61732.5,,4,,,BULLISH crossover
