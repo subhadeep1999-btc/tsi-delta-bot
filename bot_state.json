@@ -40,5 +40,6 @@
  "warned": [],
  "env_tf": 45,
  "kb_sent": true,
- "tf": 45
+ "tf": 60,
+ "tg_offset": 768505395
 }
