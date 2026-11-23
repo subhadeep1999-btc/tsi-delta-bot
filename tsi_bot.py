@@ -23,6 +23,7 @@ Secrets come from environment variables: DELTA_API_KEY DELTA_API_SECRET TG_TOKEN
 Settings can also be set with environment variables of the same name as the settings below (MODE, CAPITAL_INR ...).
 """
 import os
+import re
 import sys
 import csv
 import json
@@ -57,6 +58,8 @@ SYMBOL = "BTCUSD"
 TSI_LONG, TSI_SHORT, TSI_SIGNAL = 25, 13, 13
 CALC_MIN, CHART_MIN = 45, 60
 MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
+TSI_TIMEFRAME = str(env("TSI_TIMEFRAME", "45"))     # 45 = TSI on 45m candles read on the 1h chart (normal plan) | 60 = TSI on 1h candles (the slower plan for choppy markets).
+                                                     # You can also switch from Telegram: send  1h  or  45  to the bot (the latest change, variable or message, wins).
 SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = as TradingView draws it (the 45m candle that OPENS inside the 1h candle; known up to 45 min after the 1h close) | "A" = last 45m candle already closed at the 1h close
 CANDLE_MEASURE = env("CANDLE_MEASURE", "change").strip().strip("\"'").lower()   # "change" = |close - previous close| (what TradingView shows) | "range" = high - low
 LOOKBACK_CANDLES = env("LOOKBACK_CANDLES", 2)
@@ -313,13 +316,37 @@ def skip_flags(bars, extra, lookback, thr):
     return flags
 
 
-def load_market():
+def parse_tf(text):
+    """45 or 60 from words like "1h", "1 hour", "60", "45m", "TSI 45m"; None if it does not say."""
+    t = (text or "").lower()
+    if re.search(r"(?<!\d)(1\s*h|1\s*hr|1\s*hour|60)(?!\d)", t):
+        return 60
+    if re.search(r"(?<!\d)45(?!\d)", t):
+        return 45
+    return None
+
+
+TF = parse_tf(TSI_TIMEFRAME) or 45                  # the plan in use during this run
+
+
+def load_market(tf=None):
+    tf = tf or TF
     c15 = fetch_15m()
     bars45, bars1h = aggregate(c15, CALC_MIN), aggregate(c15, CHART_MIN)
-    if len(bars45) < 150 or len(bars1h) < 100:
+    if len(bars1h) < 100 or (tf != 60 and len(bars45) < 150):
         raise RuntimeError("too few candles")
-    tsi, sig = tsi_series([b["c"] for b in bars45])
-    sg, extra, shown, known = chart_signals(bars1h, bars45, tsi, sig)
+    if tf == 60:                                        # TSI on the 1h candles themselves: the signal is known when the 1h candle closes
+        tsi, sig = tsi_series([b["c"] for b in bars1h])
+        sg, shown, prev = [0], [(tsi[0], sig[0])], tsi[0] - sig[0]
+        for k in range(1, len(bars1h)):
+            cur = tsi[k] - sig[k]
+            sg.append(cross(prev, cur))
+            shown.append((tsi[k], sig[k]))
+            prev = cur
+        extra, known = [0.0] * len(bars1h), [b["end"] for b in bars1h]
+    else:
+        tsi, sig = tsi_series([b["c"] for b in bars45])
+        sg, extra, shown, known = chart_signals(bars1h, bars45, tsi, sig)
     skip = skip_flags(bars1h, extra, LOOKBACK_CANDLES, MAX_CANDLE_PTS)
     return {"c15": c15, "bars": bars1h, "sg": sg, "skip": skip, "extra": extra, "shown": shown, "known": known}
 
@@ -354,6 +381,77 @@ def log_row(row):
         if new:
             w.writerow(["time_ist", "mode", "event", "side", "entry", "exit", "contracts", "pts", "wallet_pnl", "note"])
         w.writerow(row)
+
+
+def send_keyboard(text):
+    """A message with two buttons under it. Tapping a button sends its text to the bot as a normal message."""
+    print(text, flush=True)
+    try:
+        requests.post("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, timeout=20, json={
+            "chat_id": TG_CHAT_ID, "text": text,
+            "reply_markup": {"keyboard": [[{"text": "TSI 1h"}, {"text": "TSI 45m"}]], "resize_keyboard": True, "is_persistent": True}})
+    except Exception as e:
+        print("Telegram send failed:", e, flush=True)
+
+
+def read_telegram(st):
+    """What you sent the bot since the last run (only from your own chat)."""
+    texts = []
+    try:
+        r = requests.get("https://api.telegram.org/bot%s/getUpdates" % TG_TOKEN,
+                         params={"offset": st.get("tg_offset", 0), "timeout": 0}, timeout=20).json()
+    except Exception as e:
+        print("Telegram read failed:", e, flush=True)
+        return texts
+    if not r.get("ok"):
+        print("Telegram read problem:", str(r)[:150], flush=True)
+        return texts
+    for u in r.get("result", []):
+        st["tg_offset"] = u["update_id"] + 1
+        m = u.get("message") or {}
+        if str((m.get("chat") or {}).get("id")) == str(TG_CHAT_ID) and m.get("text"):
+            texts.append(m["text"])
+    return texts
+
+
+def tf_name(tf):
+    return "1h candles (slower plan)" if tf == 60 else "45m candles (normal plan)"
+
+
+def apply_mode(st):
+    """Decides the TSI plan for this run: the GitHub variable TSI_TIMEFRAME or your Telegram message, whichever changed last."""
+    global TF
+    env_tf = parse_tf(TSI_TIMEFRAME) or 45
+    cur = st.get("tf") or env_tf
+    want, ask = None, False
+    if "env_tf" in st and st["env_tf"] != env_tf:
+        want = env_tf                                       # you changed the variable in GitHub
+    st["env_tf"] = env_tf
+    for text in read_telegram(st):
+        low = text.strip().lower()
+        tf = parse_tf(low) if ("tsi" in low or len(low) <= 12) else None
+        if tf:
+            want = tf
+        elif low in ("mode", "/mode", "status", "/status", "plan", "tsi"):
+            ask = True
+    if want and want != cur:
+        try:                                                # the crossover already standing in the new plan is not traded; wait for the next one
+            m = load_market(want)
+            i = len(m["bars"]) - 1
+            if m["sg"][i]:
+                st["handled"].append("%d|%d" % (m["bars"][i]["end"], m["sg"][i]))
+        except Exception as e:
+            print("could not read the market while switching:", str(e)[:100], flush=True)
+        cur = want
+        send_keyboard("🔀 [%s] TSI plan changed: TSI is now calculated on %s. An open trade stays until its stop or the next crossover in this plan. "
+                      "Tap a button any time to switch." % (MODE.upper(), tf_name(cur)))
+        st["kb_sent"] = True
+    elif ask or not st.get("kb_sent"):
+        send_keyboard("ℹ️ [%s] TSI plan now: %s. Tap TSI 1h for the slower plan (choppy market) or TSI 45m for the normal plan." % (MODE.upper(), tf_name(cur)))
+        st["kb_sent"] = True
+    st["tf"] = cur
+    TF = cur
+    return cur
 
 
 def send_alert(text):
@@ -602,6 +700,7 @@ def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     if kn > bar["end"]:
         head += ", confirmed %s IST when the 45m candle closed" % ist(kn, "%H:%M")
     tail = "\nTSI %.2f vs signal %.2f | candle move %.0f pts (range %.0f) | price %.1f" % (tv[0], tv[1], size_of(bars, i), bar["h"] - bar["l"], bar["c"]) if tv else ""
+    tail += "\nTSI plan: %s" % tf_name(TF)
     age = (now - (mkt.get("known") or [bar["end"]] * (i + 1))[i]) / 60.0       # minutes since the signal became known
     if age > MAX_SIGNAL_AGE_MIN:
         st["handled"].append(key)
@@ -648,14 +747,19 @@ def heartbeat(api, pid, st, now):
     trade = st["trade"]
     pos = "flat" if not trade else "%s %d contract(s) from %.1f (since %s), stop %.1f" % (
         "LONG" if trade["side"] == 1 else "SHORT", trade["n"], trade["entry"], trade["opened_label"], trade["sl1"])
-    send_alert("💚 [%s] bot running | %s\n%s\n%s%s" % (MODE.upper(), pos, totals_text(st), balance_text(api),
+    send_alert("💚 [%s] bot running | TSI on %s | %s\n%s\n%s%s" % (MODE.upper(), "1h candles" if TF == 60 else "45m candles", pos, totals_text(st), balance_text(api),
                                                     " | PAUSED" if PAUSE else (" | HALTED" if st["halted"] else "")))
     st["last_hb_date"] = day
 
 
 def run_once(api, pid, cv, tick, st):
     now = time.time()
-    mkt = load_market()
+    try:
+        apply_mode(st)
+        save_state(st)
+    except Exception as e:
+        print("mode check problem:", str(e)[:150], flush=True)
+    mkt = load_market(TF)
     try:
         size = reconcile(api, pid, st, mkt, now)
         save_state(st)
