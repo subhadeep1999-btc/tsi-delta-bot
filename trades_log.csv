@@ -9,3 +9,4 @@ time_ist,mode,event,side,entry,exit,contracts,pts,wallet_pnl,note
 2026-11-21 10:00,live,SKIP,BEARISH,,,,,,big candle
 2026-11-21 13:01,live,SKIP,BULLISH,,,,,,big candle
 2026-11-22 16:01,live,SKIP,BULLISH,,,,,,big candle
+2026-11-23 08:00,live,OPEN,SHORT,60662.5,,4,,,BEARISH crossover
