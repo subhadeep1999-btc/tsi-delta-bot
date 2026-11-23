@@ -37,5 +37,8 @@
   }
  },
  "last_hb_date": "2026-11-23",
- "warned": []
+ "warned": [],
+ "env_tf": 45,
+ "kb_sent": true,
+ "tf": 45
 }
