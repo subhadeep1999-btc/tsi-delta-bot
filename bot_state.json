@@ -27,7 +27,7 @@
   "1795456800|-1",
   "1795532400|1"
  ],
- "halted": false,
+ "halted": true,
  "trade": {
   "side": 1,
   "entry": 60421.0,
@@ -55,8 +55,8 @@
  "warned": [],
  "env_tf": 45,
  "kb_sent": true,
- "tf": 45,
- "tg_offset": 768505396,
+ "tf": 60,
+ "tg_offset": 768505397,
  "ema_watch": {
   "trade_ts": 1795532474.9029071,
   "seen_end": 0,
