@@ -27,7 +27,7 @@
   "1795456800|-1",
   "1795532400|1"
  ],
- "halted": true,
+ "halted": false,
  "trade": {
   "side": 1,
   "entry": 60421.0,
