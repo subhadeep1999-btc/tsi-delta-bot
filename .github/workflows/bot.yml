@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "once = normal run, check = read-only test, test-order = demo order test"
+        description: "once = normal run, check = read-only test, test-order = demo order test, status = summary, resume = clear a safety halt"
         default: "once"
         type: choice
         options:
@@ -12,6 +12,7 @@ on:
           - check
           - test-order
           - status
+          - resume
 
 concurrency:
   group: tsi-bot
