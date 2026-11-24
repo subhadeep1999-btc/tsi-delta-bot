@@ -58,6 +58,8 @@ SYMBOL = "BTCUSD"
 TSI_LONG, TSI_SHORT, TSI_SIGNAL = 25, 13, 13
 CALC_MIN, CHART_MIN = 45, 60
 MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
+EMA_ALERT = str(env("EMA_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = tell me when a 1h candle closes against the 2h 5 EMA while a trade is open (message only)
+EMA_LEN = 5
 TSI_TIMEFRAME = str(env("TSI_TIMEFRAME", "45"))     # 45 = TSI on 45m candles read on the 1h chart (normal plan) | 60 = TSI on 1h candles (the slower plan for choppy markets).
                                                      # You can also switch from Telegram: send  1h  or  45  to the bot (the latest change, variable or message, wins).
 SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = as TradingView draws it (the 45m candle that OPENS inside the 1h candle; known up to 45 min after the 1h close) | "A" = last 45m candle already closed at the 1h close
@@ -683,6 +685,40 @@ def bot_stop_check(api, pid, st, mkt, size, now):
     return 0
 
 
+def ema_watch(st, mkt, now):
+    """MESSAGE ONLY. While a trade is open: LONG -> tell me when a 1h candle CLOSES BELOW the 2h 5 EMA, SHORT -> when it closes ABOVE it.
+    The 1h close is compared with the EMA of the last 2h candle that had finished when that 1h candle opened. Only candles that close
+    after the trade was opened count, and it speaks once each time the close moves to the wrong side."""
+    trade = st.get("trade")
+    if not EMA_ALERT or not trade:
+        st.pop("ema_watch", None)
+        return
+    w = st.get("ema_watch")
+    if not w or w.get("trade_ts") != trade["opened_ts"]:
+        w = st["ema_watch"] = {"trade_ts": trade["opened_ts"], "seen_end": 0, "side": 0}
+    b120 = aggregate(mkt["c15"], 120)
+    if len(b120) < EMA_LEN + 3:
+        return
+    e2 = ema([b["c"] for b in b120], EMA_LEN)
+    ends2 = [b["end"] for b in b120]
+    bad = -trade["side"]                                       # LONG is hurt by a close BELOW (-1), SHORT by a close ABOVE (+1)
+    for hb in mkt["bars"]:
+        if hb["end"] <= trade["opened_ts"] or hb["end"] <= w["seen_end"]:
+            continue
+        j = bisect_right(ends2, hb["t"]) - 1
+        if j < EMA_LEN:
+            continue
+        side = 1 if hb["c"] > e2[j] else -1 if hb["c"] < e2[j] else 0
+        w["seen_end"] = hb["end"]
+        if side == bad and w["side"] != bad and now - hb["end"] <= 3 * 3600:
+            pts = (hb["c"] - trade["entry"]) * trade["side"]
+            send_alert("🔔 [%s] %s trade: the 1h candle %s-%s IST closed %s the 2h 5 EMA (close %.1f vs EMA %.1f).\n"
+                       "Alert only - nothing was changed. Trade opened %s at %.1f; now %+.0f pts at the candle close; stop %.1f."
+                       % (MODE.upper(), "LONG" if trade["side"] == 1 else "SHORT", ist(hb["t"], "%H:%M"), ist(hb["end"], "%H:%M"),
+                          "BELOW" if side == -1 else "ABOVE", hb["c"], e2[j], trade["opened_label"], trade["entry"], pts, trade["sl1"]))
+        w["side"] = side
+
+
 def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     bars, i = mkt["bars"], len(mkt["bars"]) - 1
     d = mkt["sg"][i]
@@ -766,6 +802,10 @@ def run_once(api, pid, cv, tick, st):
         size = bot_stop_check(api, pid, st, mkt, size, now)
         save_state(st)
         handle_crossover(api, pid, cv, tick, st, mkt, size, now)
+        try:
+            ema_watch(st, mkt, now)
+        except Exception as e:                                  # an alert problem must never disturb trading
+            print("ema watch problem:", str(e)[:150], flush=True)
         heartbeat(api, pid, st, now)
     except Halt as h:
         st["halted"] = True
