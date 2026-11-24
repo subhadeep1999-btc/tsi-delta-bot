@@ -53,6 +53,11 @@
  "warned": [],
  "env_tf": 45,
  "kb_sent": true,
- "tf": 60,
- "tg_offset": 768505395
+ "tf": 45,
+ "tg_offset": 768505396,
+ "ema_watch": {
+  "trade_ts": 1795456871.5200763,
+  "seen_end": 1795521600,
+  "side": -1
+ }
 }
