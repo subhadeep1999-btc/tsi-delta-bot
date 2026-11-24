@@ -622,8 +622,64 @@ def open_position(api, pid, cv, tick, side, price, now, info):
 
 
 # ============================ one run ============================
-def reconcile(api, pid, st, mkt, now):
-    """Compare the bot's memory with Delta. Returns current signed size."""
+def place_stops(api, trade, tick):
+    """The bot's exchange stops (800 and 1200 points from the entry) for the trade record. Returns message lines."""
+    side, lines, problems = trade["side"], [], []
+    close_side = "sell" if side == 1 else "buy"
+    trade["stop_ids"] = {}
+    for name, dist in (("sl1", MAX_LOSS_PTS), ("sl3", HARD_STOP_PTS)):
+        if not dist or (name == "sl3" and dist <= MAX_LOSS_PTS):
+            continue
+        px = round_tick(trade["entry"] - side * dist, tick)
+        try:
+            r = api.stop_order(close_side, trade["n"], px)
+            trade["stop_ids"][name] = (r.get("result", {}) or {}).get("id")
+            lines.append("🛡 %s placed at %.1f (%d points from entry)" % ("Stop-loss" if name == "sl1" else "Hard stop", px, dist))
+        except Exception as e:
+            problems.append("%s: %s" % (name, str(e)[:120]))
+    trade["stop_ids"] = {k: v for k, v in trade["stop_ids"].items() if v is not None}
+    if problems:
+        lines.append("⚠️ Exchange stop NOT placed (%s). The bot checks the %d-point stop on every run and will close at market." %
+                     ("; ".join(problems), MAX_LOSS_PTS))
+    return lines
+
+
+def confirm_position(api, pid, size):
+    """Before reacting to a position that differs from the bot's memory, read it twice more so one bad answer from Delta cannot fool the bot."""
+    raw = {}
+    for _ in range(2):
+        time.sleep(2)
+        s2, raw = api.position(pid)
+        if s2 != size:
+            raise Halt("Delta's position keeps changing (%g, then %g). Check the account, then run resume." % (size, s2))
+    return raw
+
+
+def adopt_position(api, pid, st, mkt, now, tick, size, raw, old):
+    """You changed the position by hand. The real position on Delta is the truth: the bot closes its old record and manages yours."""
+    lines = []
+    last_px = mkt["c15"][-1][4]
+    if old:
+        cancel_stops(api, pid, old)
+        pts, wallet, pct = book_close(st, old, last_px, "closed by you by hand (price estimated at the latest candle)", now)
+        lines.append(close_text(old, last_px, "closed by you by hand, price estimated", pts, wallet, pct, now))
+    entry = float(raw.get("entry_price") or last_px)
+    sd = 1 if size > 0 else -1
+    trade = {"side": sd, "entry": entry, "n": int(abs(size)), "cv": 0.001, "opened_ts": now,
+             "opened_label": ist(now, "%d %b %H:%M IST") + " (your trade, not opened by the bot)", "sl1": entry - sd * MAX_LOSS_PTS, "stop_ids": {}}
+    lines += place_stops(api, trade, tick)
+    st["trade"] = trade
+    st["halted"] = False
+    log_row([ist(now, "%Y-%m-%d %H:%M"), MODE, "ADOPT", "LONG" if sd == 1 else "SHORT", entry, "", trade["n"], "", "", "position changed by hand"])
+    word = "LONG" if sd == 1 else "SHORT"
+    send_alert("ℹ️ [%s] I see you changed the position by hand: Delta now has %s %d contract(s) at %.1f.\n%s%s\n"
+               "The bot now manages this trade. Same-direction crossover: nothing changes. Opposite crossover: it closes all %d contract(s) and opens its own trade."
+               % (MODE.upper(), word, trade["n"], entry, ("\n".join(lines) + "\n") if lines else "", "", trade["n"]))
+
+
+def reconcile(api, pid, st, mkt, now, tick=None):
+    """Compare the bot's memory with Delta. The real position on Delta wins. Returns the current signed size."""
+    tick = tick or 0.5
     size, raw = api.position(pid)
     trade = st["trade"]
     if trade and size == 0:                                   # stopped out, liquidated or closed by hand
@@ -651,17 +707,19 @@ def reconcile(api, pid, st, mkt, now):
         pts, wallet, pct = book_close(st, trade, exit_px, why, now)
         send_alert(close_text(trade, exit_px, why, pts, wallet, pct, now) + "\nBot is flat; the next valid crossover opens a trade.\n"
                    + totals_text(st) + "\n" + balance_text(api))
-    elif trade and (size > 0) != (trade["side"] == 1):
-        raise Halt("Delta shows %g but the bot expected a %s. Check the account." % (size, "LONG" if trade["side"] == 1 else "SHORT"))
-    elif not trade and size != 0:                             # position opened by hand: take it over
-        entry = float(raw.get("entry_price") or mkt["c15"][-1][4])
-        sd = 1 if size > 0 else -1
-        st["trade"] = {"side": sd, "entry": entry, "n": int(abs(size)), "cv": 0.001, "opened_ts": now,
-                       "opened_label": ist(now, "%d %b %H:%M IST") + " (found, not opened by the bot)",
-                       "sl1": entry - sd * MAX_LOSS_PTS, "stop_ids": {}}
-        send_alert("ℹ️ Found an open %s of %d contract(s) at %.1f that the bot did not open. It is now managed: reversed on the "
-                   "next valid crossover, with the %d-point bot-side stop check." %
-                   ("LONG" if sd == 1 else "SHORT", abs(size), entry, MAX_LOSS_PTS))
+    elif trade and (size > 0) != (trade["side"] == 1):        # you closed the bot's trade and opened the opposite one
+        raw = confirm_position(api, pid, size)
+        adopt_position(api, pid, st, mkt, now, tick, size, raw, trade)
+    elif not trade and size != 0:                             # a position opened by hand while the bot was flat
+        raw = confirm_position(api, pid, size)
+        adopt_position(api, pid, st, mkt, now, tick, size, raw, None)
+    elif trade and int(abs(size)) != int(trade["n"]):         # same direction, but you added or reduced contracts
+        raw = confirm_position(api, pid, size)
+        cancel_stops(api, pid, trade)
+        old_n, trade["n"] = trade["n"], int(abs(size))
+        lines = place_stops(api, trade, tick)
+        send_alert("ℹ️ [%s] The quantity changed by hand: %s %d -> %d contract(s). The stops were replaced to match.\n%s"
+                   % (MODE.upper(), "LONG" if trade["side"] == 1 else "SHORT", old_n, trade["n"], "\n".join(lines)))
     return 0 if (trade and size == 0) else size
 
 
@@ -797,7 +855,7 @@ def run_once(api, pid, cv, tick, st):
         print("mode check problem:", str(e)[:150], flush=True)
     mkt = load_market(TF)
     try:
-        size = reconcile(api, pid, st, mkt, now)
+        size = reconcile(api, pid, st, mkt, now, tick)
         save_state(st)
         size = bot_stop_check(api, pid, st, mkt, size, now)
         save_state(st)
