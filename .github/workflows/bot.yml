@@ -49,6 +49,8 @@ jobs:
           BOT_PAUSE: ${{ vars.BOT_PAUSE }}
           FULL_BUDGET: ${{ vars.FULL_BUDGET }}
           MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
+          TSI_TIMEFRAME: ${{ vars.TSI_TIMEFRAME }}
+          EMA_ALERT: ${{ vars.EMA_ALERT }}
         run: python tsi_bot.py --${{ inputs.cmd || 'once' }}
 
       - name: Save bot memory
