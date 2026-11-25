@@ -58,10 +58,10 @@
  "env_tf": 45,
  "kb_sent": true,
  "tf": 45,
- "tg_offset": 768505399,
+ "tg_offset": 768505401,
  "ema_watch": {
   "trade_ts": 1795627860.7219067,
-  "seen_end": 0,
-  "side": 0
+  "seen_end": 1795629600,
+  "side": 1
  }
 }
