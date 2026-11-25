@@ -18,3 +18,4 @@ time_ist,mode,event,side,entry,exit,contracts,pts,wallet_pnl,note
 2026-11-24 20:31,live,OPEN,LONG,60421.0,,4,,,BULLISH crossover
 2026-11-24 22:35,live,CLOSE closed by you by hand (price estimated at the latest candle),LONG,60421.0,59402.0,4,-1019.0,-4.076,
 2026-11-24 22:35,live,ADOPT,SHORT,59923.0,,4,,,position changed by hand
+2026-11-25 14:31,live,CLOSE closed outside the bot (manual?),SHORT,59923.0,59400.0,4,523.0,2.092,
