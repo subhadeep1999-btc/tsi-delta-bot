@@ -20,3 +20,5 @@ time_ist,mode,event,side,entry,exit,contracts,pts,wallet_pnl,note
 2026-11-24 22:35,live,ADOPT,SHORT,59923.0,,4,,,position changed by hand
 2026-11-25 14:31,live,CLOSE closed outside the bot (manual?),SHORT,59923.0,59400.0,4,523.0,2.092,
 2026-11-25 23:01,live,OPEN,LONG,59256.5,,4,,,BULLISH crossover
+2026-11-26 17:31,live,CLOSE reversed by crossover,LONG,59256.5,60784.5,4,1528.0,6.112,
+2026-11-26 17:31,live,OPEN,SHORT,60867.0,,4,,,BEARISH crossover
