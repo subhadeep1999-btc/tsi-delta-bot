@@ -7,6 +7,11 @@ Rules
     That 45m candle closes between 0 and 45 minutes AFTER the 1h close, so the signal is confirmed and traded then
     (SIGNAL_MAP=A = the last 45m candle already closed at the 1h close; matches the chart only about half the time).
     A crossover = TSI crossing its signal line between two consecutive 1h candles.
+  - FAST ENTRY (SIGNAL_MAP=L, optional, NOT the default): at the 1h close the 45m candle that is still forming is used as it stands at that moment
+    (this is the TSI value the chart shows when the 1h candle closes), so the trade is placed within seconds of the new candle opening.
+    That value can still change before the 45m candle finishes (a few signals may not hold). Send "fast" to the bot to use it, "confirmed" to go back.
+  - TIMING: a run started up to WAIT_MAX_SEC (240) before the moment a signal becomes known (the 45m candle close for the 45m plan,
+    the 1h close for the 1h plan) stays awake and trades within seconds of that close.
   - Every valid crossover: close the running trade and open a new one (bullish = LONG, bearish = SHORT).
     From flat (also after a stop-out or a manual close) the next valid crossover opens a trade, either direction.
   - BIG-CANDLE SKIP: the crossover is skipped (nothing closed, nothing opened) if the crossover 1h candle, the one
@@ -60,9 +65,14 @@ CALC_MIN, CHART_MIN = 45, 60
 MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
 EMA_ALERT = str(env("EMA_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = tell me when a 1h candle closes against the 2h 5 EMA while a trade is open (message only)
 EMA_LEN = 5
+EMA3_ALERT = str(env("EMA3_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = a small message when a 1h candle closes above/below the 3h 5 EMA (always, with or without a trade)
+EMA3_EVERY = str(env("EMA3_EVERY", "0")).strip().lower() in ("1", "true", "yes", "on")        # 0 = only when the close moves to the OTHER side of the EMA | 1 = after every 1h close
 TSI_TIMEFRAME = str(env("TSI_TIMEFRAME", "45"))     # 45 = TSI on 45m candles read on the 1h chart (normal plan) | 60 = TSI on 1h candles (the slower plan for choppy markets).
                                                      # You can also switch from Telegram: send  1h  or  45  to the bot (the latest change, variable or message, wins).
-SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = as TradingView draws it (the 45m candle that OPENS inside the 1h candle; known up to 45 min after the 1h close) | "A" = last 45m candle already closed at the 1h close
+SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = confirmed (default): | "L" = FAST: at the 1h close use the 45m candle still forming, as the chart shows it at that moment | (B:) the 45m candle that OPENS inside the 1h candle, known up to 45 min after the 1h close | "A" = last 45m candle already closed at the 1h close
+PLAN_TAG = env("PLAN", "").strip()                # set by a cron job: "45" = only run while the 45m plan is on, "60" = only while the 1h plan is on ("" = always)
+WAIT_MAX_SEC = env("WAIT_MAX_SEC", 240)           # a run that starts at most this many seconds before the next signal moment waits for it, then trades at once
+LIVE = SIGNAL_MAP == "L"                          # changed for the run by apply_mode (Telegram: fast / confirmed)
 CANDLE_MEASURE = env("CANDLE_MEASURE", "change").strip().strip("\"'").lower()   # "change" = |close - previous close| (what TradingView shows) | "range" = high - low
 LOOKBACK_CANDLES = env("LOOKBACK_CANDLES", 2)
 MAX_LOSS_PTS = env("MAX_LOSS_PTS", 800)
@@ -305,7 +315,7 @@ def chart_signals(bars1h, bars45, tsi, sig):
         cur = tsi[j] - sig[j]
         out.append(cross(prev, cur) if prev is not None else 0)
         shown.append((tsi[j], sig[j]))
-        known.append(max(cb["end"], bars45[j]["end"]))
+        known.append(cb["end"] if bars45[j].get("partial") else max(cb["end"], bars45[j]["end"]))
         prev, prev_j = cur, j
     return out, extra, shown, known
 
@@ -331,10 +341,27 @@ def parse_tf(text):
 TF = parse_tf(TSI_TIMEFRAME) or 45                  # the plan in use during this run
 
 
+def live_partial(c15, bars45):
+    """The 45m candle that is still forming, built from the 15m candles finished so far (what the chart shows at the 1h close). [] if none."""
+    if not c15:
+        return []
+    step = CALC_MIN * 60
+    b = c15[-1][0] - c15[-1][0] % step
+    if bars45 and bars45[-1]["t"] >= b:
+        return []                                        # that 45m candle is already complete
+    parts = [x for x in c15 if x[0] >= b]
+    if not parts or parts[0][0] != b:
+        return []
+    return [{"t": b, "end": b + step, "o": parts[0][1], "h": max(x[2] for x in parts), "l": min(x[3] for x in parts),
+             "c": parts[-1][4], "partial": True}]
+
+
 def load_market(tf=None):
     tf = tf or TF
     c15 = fetch_15m()
     bars45, bars1h = aggregate(c15, CALC_MIN), aggregate(c15, CHART_MIN)
+    if LIVE and tf != 60:
+        bars45 = bars45 + live_partial(c15, bars45)
     if len(bars1h) < 100 or (tf != 60 and len(bars45) < 150):
         raise RuntimeError("too few candles")
     if tf == 60:                                        # TSI on the 1h candles themselves: the signal is known when the 1h candle closes
@@ -422,7 +449,8 @@ def tf_name(tf):
 
 def apply_mode(st):
     """Decides the TSI plan for this run: the GitHub variable TSI_TIMEFRAME or your Telegram message, whichever changed last."""
-    global TF
+    global TF, LIVE
+    live_want = None
     env_tf = parse_tf(TSI_TIMEFRAME) or 45
     cur = st.get("tf") or env_tf
     want, ask = None, False
@@ -432,7 +460,11 @@ def apply_mode(st):
     for text in read_telegram(st):
         low = text.strip().lower()
         tf = parse_tf(low) if ("tsi" in low or len(low) <= 12) else None
-        if tf:
+        if low in ("fast", "fast entry", "/fast"):
+            live_want = True
+        elif low in ("confirmed", "confirmed entry", "/confirmed"):
+            live_want = False
+        elif tf:
             want = tf
         elif low in ("mode", "/mode", "status", "/status", "plan", "tsi"):
             ask = True
@@ -451,6 +483,12 @@ def apply_mode(st):
     elif ask or not st.get("kb_sent"):
         send_keyboard("ℹ️ [%s] TSI plan now: %s. Tap TSI 1h for the slower plan (choppy market) or TSI 45m for the normal plan." % (MODE.upper(), tf_name(cur)))
         st["kb_sent"] = True
+    if live_want is not None:
+        st["live"] = live_want
+        send_keyboard("🔀 [%s] Entry mode: %s" % (MODE.upper(), "FAST - the trade is placed within seconds of the 1h close, using the 45m candle as it stands then (a few signals may not hold)."
+                                                    if live_want else "CONFIRMED - the bot waits until the 45m candle has finished, as before (later, but the signal cannot change)."))
+        st["kb_sent"] = True
+    LIVE = st["live"] if "live" in st else (SIGNAL_MAP == "L")
     st["tf"] = cur
     TF = cur
     return cur
@@ -777,6 +815,41 @@ def ema_watch(st, mkt, now):
         w["side"] = side
 
 
+def ema3_note(st, mkt, now):
+    """MESSAGE ONLY, trade or no trade: a small note when a 1h candle CLOSES above or below the 5 EMA of the 3h candles (3h EMA on the 1h chart).
+    The 1h close is compared with the EMA of the last 3h candle that had finished when that 1h candle opened. By default it speaks when the close
+    moves to the other side of the EMA (EMA3_EVERY=1: after every 1h close)."""
+    if not EMA3_ALERT:
+        return
+    b180 = aggregate(mkt["c15"], 180)
+    if len(b180) < EMA_LEN + 3 or not mkt["bars"]:
+        return
+    e3 = ema([b["c"] for b in b180], EMA_LEN)
+    ends3 = [b["end"] for b in b180]
+
+    def side_of(hb):
+        j = bisect_right(ends3, hb["t"]) - 1
+        if j < EMA_LEN:
+            return None, None
+        return (1 if hb["c"] > e3[j] else -1 if hb["c"] < e3[j] else 0), e3[j]
+    w = st.get("ema3")
+    if not w:                                                  # first run: start from now, no old alerts
+        last = mkt["bars"][-1]
+        w = st["ema3"] = {"seen_end": last["end"], "side": side_of(last)[0] or 0}
+        return
+    for hb in mkt["bars"]:
+        if hb["end"] <= w["seen_end"]:
+            continue
+        side, e = side_of(hb)
+        w["seen_end"] = hb["end"]
+        if side is None:
+            continue
+        if side != 0 and (EMA3_EVERY or side != w["side"]) and now - hb["end"] <= 3 * 3600:
+            send_alert("📏 [%s] 1h candle %s-%s IST closed %s the 3h 5 EMA: close %.1f vs EMA %.1f (%+.1f)"
+                       % (MODE.upper(), ist(hb["t"], "%H:%M"), ist(hb["end"], "%H:%M"), "ABOVE" if side == 1 else "BELOW", hb["c"], e, hb["c"] - e))
+        w["side"] = side if side != 0 else w["side"]
+
+
 def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     bars, i = mkt["bars"], len(mkt["bars"]) - 1
     d = mkt["sg"][i]
@@ -793,6 +866,8 @@ def handle_crossover(api, pid, cv, tick, st, mkt, size, now):
     kn = (mkt.get("known") or [bar["end"]] * (i + 1))[i]
     if kn > bar["end"]:
         head += ", confirmed %s IST when the 45m candle closed" % ist(kn, "%H:%M")
+    elif LIVE and TF != 60:
+        head += " (FAST signal: the 45m candle was still forming)"
     tail = "\nTSI %.2f vs signal %.2f | candle move %.0f pts (range %.0f) | price %.1f" % (tv[0], tv[1], size_of(bars, i), bar["h"] - bar["l"], bar["c"]) if tv else ""
     tail += "\nTSI plan: %s" % tf_name(TF)
     age = (now - (mkt.get("known") or [bar["end"]] * (i + 1))[i]) / 60.0       # minutes since the signal became known
@@ -846,6 +921,58 @@ def heartbeat(api, pid, st, now):
     st["last_hb_date"] = day
 
 
+def candle_published(ts):
+    """True when Delta already lists the finished 15m candle that started at ts."""
+    try:
+        r = requests.get(DATA_BASE + "/v2/history/candles",
+                         params={"symbol": SYMBOL, "resolution": "15m", "start": str(ts - 900), "end": str(int(time.time()))},
+                         headers={"User-Agent": UA}, timeout=10)
+        rows = r.json().get("result", [])
+        return any(int(x["time"]) == ts for x in rows)
+    except Exception:
+        return False
+
+
+def next_signal_time(now):
+    """The next moment a crossover can become known: the 45m candle close that decides a 1h candle (45m plan, confirmed mode),
+    or the 1h close itself (1h plan, or fast mode)."""
+    step = CALC_MIN * 60
+    base = int(now) // 3600 * 3600
+    for E in (base, base + 3600):                                # the last 1h close and the next one
+        k = E if (TF == 60 or LIVE) else ((E - 1) // step) * step + step
+        if k > now:
+            return k
+    return None
+
+
+def next_wait_target(now):
+    """The next moment worth staying awake for: when a TSI crossover can become known, and (while the 3h EMA note is on) every 1h close."""
+    cands = [next_signal_time(now)]
+    if EMA3_ALERT:
+        cands.append(int(now) // 3600 * 3600 + 3600)
+    cands = [c for c in cands if c]
+    return min(cands) if cands else None
+
+
+def wait_for_close():
+    """If the next such moment is within WAIT_MAX_SEC, stay awake until that candle has closed and Delta lists it. True if it waited."""
+    now = time.time()
+    nxt = next_wait_target(now)
+    if nxt is None or nxt - now > WAIT_MAX_SEC:
+        return False
+    print("waiting %.0f s for the candle to close (%s IST)" % (nxt - now, ist(nxt, "%H:%M")), flush=True)
+    while time.time() < nxt:
+        time.sleep(min(0.5, max(0.0, nxt - time.time())))
+    end = time.time() + 25
+    while time.time() < end:
+        if candle_published(nxt - 900):
+            break
+        time.sleep(0.4)
+    time.sleep(0.3)
+    print("candle closed and published %.1f s after the close" % (time.time() - nxt), flush=True)
+    return True
+
+
 def run_once(api, pid, cv, tick, st):
     now = time.time()
     try:
@@ -853,17 +980,34 @@ def run_once(api, pid, cv, tick, st):
         save_state(st)
     except Exception as e:
         print("mode check problem:", str(e)[:150], flush=True)
+    tag = parse_tf(PLAN_TAG) if PLAN_TAG else None
+    if tag and tag != TF:                                       # this cron job belongs to the other plan: do nothing
+        print("This job is for the %s plan, but the %s plan is on. Nothing to do." % (tf_name(tag), tf_name(TF)), flush=True)
+        return
     mkt = load_market(TF)
     try:
         size = reconcile(api, pid, st, mkt, now, tick)
         save_state(st)
         size = bot_stop_check(api, pid, st, mkt, size, now)
         save_state(st)
+        if wait_for_close():                                    # the candle has just closed: read it again and trade at once
+            now = time.time()
+            mkt = load_market(TF)
+            fresh, _ = api.position(pid)
+            if fresh != size:                                   # something changed while waiting (stop hit, trade by hand): book it first
+                size = reconcile(api, pid, st, mkt, now, tick)
+                save_state(st)
+            else:
+                size = fresh
         handle_crossover(api, pid, cv, tick, st, mkt, size, now)
         try:
             ema_watch(st, mkt, now)
         except Exception as e:                                  # an alert problem must never disturb trading
             print("ema watch problem:", str(e)[:150], flush=True)
+        try:
+            ema3_note(st, mkt, now)
+        except Exception as e:
+            print("3h ema note problem:", str(e)[:150], flush=True)
         heartbeat(api, pid, st, now)
     except Halt as h:
         st["halted"] = True
