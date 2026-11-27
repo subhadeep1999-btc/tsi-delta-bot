@@ -22,3 +22,5 @@ time_ist,mode,event,side,entry,exit,contracts,pts,wallet_pnl,note
 2026-11-25 23:01,live,OPEN,LONG,59256.5,,4,,,BULLISH crossover
 2026-11-26 17:31,live,CLOSE reversed by crossover,LONG,59256.5,60784.5,4,1528.0,6.112,
 2026-11-26 17:31,live,OPEN,SHORT,60867.0,,4,,,BEARISH crossover
+2026-11-27 08:01,live,CLOSE stop-loss hit,SHORT,60867.0,61750.0,4,-883.0,-3.532,
+2026-11-27 08:01,live,OPEN,LONG,61649.5,,4,,,BULLISH crossover
