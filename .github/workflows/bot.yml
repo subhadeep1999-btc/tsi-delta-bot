@@ -13,6 +13,10 @@ on:
           - test-order
           - status
           - resume
+      plan:
+        description: "leave empty normally. A cron job can send 45 (run only while the 45m plan is on) or 60 (run only while the 1h plan is on)"
+        default: ""
+        type: string
 
 concurrency:
   group: tsi-bot
@@ -52,6 +56,11 @@ jobs:
           MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
           TSI_TIMEFRAME: ${{ vars.TSI_TIMEFRAME }}
           EMA_ALERT: ${{ vars.EMA_ALERT }}
+          EMA3_ALERT: ${{ vars.EMA3_ALERT }}
+          EMA3_EVERY: ${{ vars.EMA3_EVERY }}
+          SIGNAL_MAP: ${{ vars.SIGNAL_MAP }}
+          PLAN: ${{ inputs.plan }}
+          WAIT_MAX_SEC: ${{ vars.WAIT_MAX_SEC }}
         run: python tsi_bot.py --${{ inputs.cmd || 'once' }}
 
       - name: Save bot memory
