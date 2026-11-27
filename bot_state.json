@@ -51,9 +51,9 @@
  "env_tf": 45,
  "kb_sent": true,
  "tf": 45,
- "tg_offset": 768505401,
+ "tg_offset": 768505402,
  "ema3": {
-  "seen_end": 1795798800,
+  "seen_end": 1795802400,
   "side": -1
  }
 }
