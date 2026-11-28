@@ -66,8 +66,8 @@ MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
 EMA_ALERT = str(env("EMA_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = tell me when a 1h candle closes against the 2h 5 EMA while a trade is open (message only)
 EMA_LEN = 5
 EMA3_ALERT = str(env("EMA3_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = a small message when a 1h candle closes above/below the 3h 5 EMA (always, with or without a trade)
-EMA3_LIVE = str(env("EMA3_LIVE", "1")).strip().lower() not in ("0", "false", "no", "off")     # 1 = like the chart line: the 3h EMA INCLUDING the 3h candle still forming (default) | 0 = only finished 3h candles
-EMA3_EVERY = str(env("EMA3_EVERY", "1")).strip().lower() in ("1", "true", "yes", "on")        # 1 = a note after EVERY 1h close (default) | 0 = only when the close moves to the OTHER side of the EMA
+EMA3_LIVE = str(env("EMA3_LIVE", "0")).strip().lower() not in ("0", "false", "no", "off")     # 0 = the 3h EMA of FINISHED 3h candles, a step line like the chart (default) | 1 = also include the 3h candle still forming
+EMA3_EVERY = str(env("EMA3_EVERY", "0")).strip().lower() in ("1", "true", "yes", "on")        # 0 = only when a 1h candle CROSSES the 3h EMA and closes on the other side (default) | 1 = a note after EVERY 1h close
 TSI_TIMEFRAME = str(env("TSI_TIMEFRAME", "45"))     # 45 = TSI on 45m candles read on the 1h chart (normal plan) | 60 = TSI on 1h candles (the slower plan for choppy markets).
                                                      # You can also switch from Telegram: send  1h  or  45  to the bot (the latest change, variable or message, wins).
 SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = confirmed (default): | "L" = FAST: at the 1h close use the 45m candle still forming, as the chart shows it at that moment | (B:) the 45m candle that OPENS inside the 1h candle, known up to 45 min after the 1h close | "A" = last 45m candle already closed at the 1h close
@@ -821,11 +821,22 @@ def ema_watch(st, mkt, now):
         w["side"] = side
 
 
+def tsi_state_text(mkt, i):
+    """'BULLISH (TSI 11.3 above signal 10.5)' from the newest TSI reading known at or before the 1h candle i; '' if none."""
+    shown = mkt.get("shown") or []
+    for j in range(min(i, len(shown) - 1), -1, -1):
+        if shown[j]:
+            tv, sg = shown[j][0], shown[j][1]
+            return "TSI state: %s crossover state (TSI %.2f %s signal %.2f)" % (
+                "🟢 BULLISH" if tv > sg else "🔴 BEARISH", tv, "above" if tv > sg else "below", sg)
+    return ""
+
+
 def ema3_note(st, mkt, now):
-    """MESSAGE ONLY, trade or no trade: a small note when a 1h candle CLOSES above or below the 5 EMA of the 3h candles (3h EMA on the 1h chart).
-    The 1h close is compared with the 3h EMA as the chart draws it: the finished 3h candles plus the 3h candle still forming, whose close so far is
-    this 1h close (EMA3_LIVE=0: finished 3h candles only). By default (EMA3_EVERY=1) it speaks after every
-    1h close; with EMA3_EVERY=0 only when the close moves to the other side of the EMA."""
+    """MESSAGE ONLY, trade or no trade. When a 1h candle CROSSES the 5 EMA of the 3h candles (3h EMA on the 1h chart) and CLOSES on the other side,
+    send a small note: 🟢 for a close ABOVE, 🔴 for a close BELOW, plus the TSI state (bullish or bearish crossover state).
+    The 1h close is compared with the EMA of the last finished 3h candle when that 1h candle opened (a step line, like the chart).
+    EMA3_LIVE=1 also includes the 3h candle still forming; EMA3_EVERY=1 sends a note after every 1h close, not only at a cross."""
     if not EMA3_ALERT:
         return
     b180 = aggregate(mkt["c15"], 180)
@@ -833,7 +844,6 @@ def ema3_note(st, mkt, now):
         return
     e3 = ema([b["c"] for b in b180], EMA_LEN)
     ends3 = [b["end"] for b in b180]
-
     k3 = 2.0 / (EMA_LEN + 1)
 
     def side_of(hb):
@@ -849,10 +859,12 @@ def ema3_note(st, mkt, now):
                 return None, None
             e = e3[j]
         return (1 if hb["c"] > e else -1 if hb["c"] < e else 0), e
+    bars = mkt["bars"]
     w = st.get("ema3")
-    if not w:                                                  # first run: report the latest finished 1h candle, nothing older
-        w = st["ema3"] = {"seen_end": mkt["bars"][-1]["end"] - 3600, "side": 0}
-    for hb in mkt["bars"]:
+    if not w:                                                  # first run: judge only the latest finished 1h candle, against the one before it
+        prev_side = side_of(bars[-2])[0] if len(bars) > 1 else 0
+        w = st["ema3"] = {"seen_end": bars[-1]["end"] - 3600, "side": prev_side or 0}
+    for i, hb in enumerate(bars):
         if hb["end"] <= w["seen_end"]:
             continue
         side, e = side_of(hb)
@@ -860,8 +872,11 @@ def ema3_note(st, mkt, now):
         if side is None:
             continue
         if side != 0 and (EMA3_EVERY or side != w["side"]) and now - hb["end"] <= 3 * 3600:
-            send_alert("📏 [%s] 1h candle %s-%s IST closed %s the 3h 5 EMA: close %.1f vs EMA %.1f (%+.1f)"
-                       % (MODE.upper(), ist(hb["t"], "%H:%M"), ist(hb["end"], "%H:%M"), "ABOVE" if side == 1 else "BELOW", hb["c"], e, hb["c"] - e))
+            tsi = tsi_state_text(mkt, i)
+            send_alert("%s [%s] 1h candle %s-%s IST %s and closed %s the 3h 5 EMA: close %.1f vs EMA %.1f (%+.1f)%s"
+                       % ("🟢" if side == 1 else "🔴", MODE.upper(), ist(hb["t"], "%H:%M"), ist(hb["end"], "%H:%M"),
+                          "crossed up" if side == 1 else "crossed down", "ABOVE" if side == 1 else "BELOW", hb["c"], e, hb["c"] - e,
+                          ("\n" + tsi) if tsi else ""))
         w["side"] = side if side != 0 else w["side"]
 
 
