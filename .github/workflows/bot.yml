@@ -58,6 +58,7 @@ jobs:
           EMA_ALERT: ${{ vars.EMA_ALERT }}
           EMA3_ALERT: ${{ vars.EMA3_ALERT }}
           EMA3_EVERY: ${{ vars.EMA3_EVERY }}
+          EMA3_LIVE: ${{ vars.EMA3_LIVE }}
           SIGNAL_MAP: ${{ vars.SIGNAL_MAP }}
           PLAN: ${{ inputs.plan }}
           WAIT_MAX_SEC: ${{ vars.WAIT_MAX_SEC }}
