@@ -66,7 +66,8 @@ MAX_CANDLE_PTS = env("MAX_CANDLE_PTS", 800)
 EMA_ALERT = str(env("EMA_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = tell me when a 1h candle closes against the 2h 5 EMA while a trade is open (message only)
 EMA_LEN = 5
 EMA3_ALERT = str(env("EMA3_ALERT", "1")).strip().lower() not in ("0", "false", "no", "off")   # 1 = a small message when a 1h candle closes above/below the 3h 5 EMA (always, with or without a trade)
-EMA3_EVERY = str(env("EMA3_EVERY", "0")).strip().lower() in ("1", "true", "yes", "on")        # 0 = only when the close moves to the OTHER side of the EMA | 1 = after every 1h close
+EMA3_LIVE = str(env("EMA3_LIVE", "1")).strip().lower() not in ("0", "false", "no", "off")     # 1 = like the chart line: the 3h EMA INCLUDING the 3h candle still forming (default) | 0 = only finished 3h candles
+EMA3_EVERY = str(env("EMA3_EVERY", "1")).strip().lower() in ("1", "true", "yes", "on")        # 1 = a note after EVERY 1h close (default) | 0 = only when the close moves to the OTHER side of the EMA
 TSI_TIMEFRAME = str(env("TSI_TIMEFRAME", "45"))     # 45 = TSI on 45m candles read on the 1h chart (normal plan) | 60 = TSI on 1h candles (the slower plan for choppy markets).
                                                      # You can also switch from Telegram: send  1h  or  45  to the bot (the latest change, variable or message, wins).
 SIGNAL_MAP = env("SIGNAL_MAP", "B").strip().strip("\"'").upper()   # "B" = confirmed (default): | "L" = FAST: at the 1h close use the 45m candle still forming, as the chart shows it at that moment | (B:) the 45m candle that OPENS inside the 1h candle, known up to 45 min after the 1h close | "A" = last 45m candle already closed at the 1h close
@@ -451,6 +452,7 @@ def apply_mode(st):
     """Decides the TSI plan for this run: the GitHub variable TSI_TIMEFRAME or your Telegram message, whichever changed last."""
     global TF, LIVE
     live_want = None
+    asked_tf = False
     env_tf = parse_tf(TSI_TIMEFRAME) or 45
     cur = st.get("tf") or env_tf
     want, ask = None, False
@@ -466,6 +468,7 @@ def apply_mode(st):
             live_want = False
         elif tf:
             want = tf
+            asked_tf = True
         elif low in ("mode", "/mode", "status", "/status", "plan", "tsi"):
             ask = True
     if want and want != cur:
@@ -479,6 +482,9 @@ def apply_mode(st):
         cur = want
         send_keyboard("🔀 [%s] TSI plan changed: TSI is now calculated on %s. An open trade stays until its stop or the next crossover in this plan. "
                       "Tap a button any time to switch." % (MODE.upper(), tf_name(cur)))
+        st["kb_sent"] = True
+    elif asked_tf:                                          # you tapped the plan that is already on: say so (it used to stay silent)
+        send_keyboard("✅ [%s] Got it. TSI plan stays: %s. Nothing changed. Bot is running; I message you at a crossover, at a 3h EMA side change, or on any problem." % (MODE.upper(), tf_name(cur)))
         st["kb_sent"] = True
     elif ask or not st.get("kb_sent"):
         send_keyboard("ℹ️ [%s] TSI plan now: %s. Tap TSI 1h for the slower plan (choppy market) or TSI 45m for the normal plan." % (MODE.upper(), tf_name(cur)))
@@ -817,8 +823,9 @@ def ema_watch(st, mkt, now):
 
 def ema3_note(st, mkt, now):
     """MESSAGE ONLY, trade or no trade: a small note when a 1h candle CLOSES above or below the 5 EMA of the 3h candles (3h EMA on the 1h chart).
-    The 1h close is compared with the EMA of the last 3h candle that had finished when that 1h candle opened. By default it speaks when the close
-    moves to the other side of the EMA (EMA3_EVERY=1: after every 1h close)."""
+    The 1h close is compared with the 3h EMA as the chart draws it: the finished 3h candles plus the 3h candle still forming, whose close so far is
+    this 1h close (EMA3_LIVE=0: finished 3h candles only). By default (EMA3_EVERY=1) it speaks after every
+    1h close; with EMA3_EVERY=0 only when the close moves to the other side of the EMA."""
     if not EMA3_ALERT:
         return
     b180 = aggregate(mkt["c15"], 180)
@@ -827,16 +834,24 @@ def ema3_note(st, mkt, now):
     e3 = ema([b["c"] for b in b180], EMA_LEN)
     ends3 = [b["end"] for b in b180]
 
+    k3 = 2.0 / (EMA_LEN + 1)
+
     def side_of(hb):
-        j = bisect_right(ends3, hb["t"]) - 1
-        if j < EMA_LEN:
-            return None, None
-        return (1 if hb["c"] > e3[j] else -1 if hb["c"] < e3[j] else 0), e3[j]
+        if EMA3_LIVE:                                          # the 3h candle holding this 1h candle is still forming: its close so far = this 1h close
+            start3 = ((hb["end"] - 1) // 10800) * 10800
+            j = bisect_right(ends3, start3) - 1                # the last 3h candle finished before it
+            if j < EMA_LEN:
+                return None, None
+            e = hb["c"] * k3 + e3[j] * (1 - k3)
+        else:
+            j = bisect_right(ends3, hb["t"]) - 1
+            if j < EMA_LEN:
+                return None, None
+            e = e3[j]
+        return (1 if hb["c"] > e else -1 if hb["c"] < e else 0), e
     w = st.get("ema3")
-    if not w:                                                  # first run: start from now, no old alerts
-        last = mkt["bars"][-1]
-        w = st["ema3"] = {"seen_end": last["end"], "side": side_of(last)[0] or 0}
-        return
+    if not w:                                                  # first run: report the latest finished 1h candle, nothing older
+        w = st["ema3"] = {"seen_end": mkt["bars"][-1]["end"] - 3600, "side": 0}
     for hb in mkt["bars"]:
         if hb["end"] <= w["seen_end"]:
             continue
